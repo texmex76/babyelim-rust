@@ -2,7 +2,7 @@
 
 This is the Rust template for the SAT variable elimination exercise.
 
-The data structures are not as refined as in the C++ equivalent, so expect slower performance. I will try to improve them.
+I had no time to implement a solution for myself yet, so I am unsure if there are any bugs.
 
 If you have any suggestions or find some bugs, pull requests are welcome!
 
@@ -14,7 +14,7 @@ cargo run -- [OPTIONS] [CNF PATH] [OUT PATH]
 
 # Testing
 
-Since simplification is not implemented now, all tests will fail.
+The tests hang if you do not provide a solution for the exercise.
 
 ```
 cargo test
@@ -23,5 +23,5 @@ cargo test
 # Logging
 
 ```
-cargo run --features "logging" -- [OPTIONS] [CNF PATH] [OUT PATH]
+cargo run --features "logging" -- [OPTIONS] [CNF PATH] [OUT PATH] [PROOF PATH]
 ```
