@@ -1,0 +1,24 @@
+[package]
+name = "babyelim-rust"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "*"
+xz2 = "*"
+flate2 = "*"
+bzip2 = "*"
+
+[dev-dependencies]
+assert_cmd = "*"
+predicates = "*"
+
+[features]
+logging = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

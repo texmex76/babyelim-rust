@@ -1,0 +1,10 @@
+target
+testy
+*.log
+*.out
+*.err
+bench/sc2016
+bench/bench.txt
+bench/bench_home.txt
+bench/output.png
+bench/sc2016.zip
