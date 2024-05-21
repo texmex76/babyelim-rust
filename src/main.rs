@@ -349,6 +349,7 @@ struct SATContext {
     config: Config,
     formula: CNFFormula,
     stats: Stats,
+    proof_file: Option<Box<dyn Write>>,
 }
 
 impl SATContext {
@@ -366,6 +367,7 @@ impl SATContext {
                 rounds: 0,
                 start_time: Instant::now(),
             },
+            proof_file: None,
         }
     }
 
@@ -381,31 +383,6 @@ impl SATContext {
             .values
             .init(self.formula.variables, self.config.verbosity);
     }
-}
-
-fn report_stats(ctx: &mut SATContext) {
-    // let elapsed_time = ctx.stats.start_time.elapsed().as_secs_f64();
-    // message!(
-    //     ctx.config.verbosity,
-    //     "{:<20} {:>10}    clauses {:.2} per subsumed",
-    //     "checked:",
-    //     ctx.stats.checked,
-    //     average(ctx.stats.subsumed, ctx.stats.subsumed)
-    // );
-    // message!(
-    //     ctx.config.verbosity,
-    //     "{:<20} {:>10}    clauses {:.0}%",
-    //     "subsumed:",
-    //     ctx.stats.subsumed,
-    //     percent(ctx.stats.subsumed, ctx.stats.parsed)
-    // );
-    // message!(
-    //     ctx.config.verbosity,
-    //     "{:<20} {:13.2} seconds",
-    //     "process-time:",
-    //     elapsed_time
-    // );
-    // TODO: Port from C++ implementation
 }
 
 fn tautological_clause(ctx: &mut SATContext, clause: &Vec<i32>) -> bool {
@@ -829,50 +806,141 @@ fn eliminate(ctx: &mut SATContext) {
     );
 }
 
-fn print(ctx: &mut SATContext) {
-    // TODO:
-    // let mut output: Box<dyn Write> = if ctx.config.output_path == "<stdout>" {
-    //     Box::new(io::stdout())
-    // } else {
-    //     match ctx.config.output_path.as_str() {
-    //         path if path.ends_with(".bz2") => {
-    //             let file = File::create(path).expect("Failed to create output file");
-    //             Box::new(BzEncoder::new(file, bzip2::Compression::default()))
-    //         }
-    //         path if path.ends_with(".gz") => {
-    //             let file = File::create(path).expect("Failed to create output file");
-    //             Box::new(GzEncoder::new(file, flate2::Compression::default()))
-    //         }
-    //         path if path.ends_with(".xz") => {
-    //             let file = File::create(path).expect("Failed to create output file");
-    //             Box::new(XzEncoder::new(file, 6)) // Compression level set to 6
-    //         }
-    //         path => Box::new(File::create(path).expect("Failed to create output file")),
-    //     }
-    // };
-    //
-    // writeln!(
-    //     output,
-    //     "p cnf {} {}",
-    //     ctx.formula.variables,
-    //     ctx.formula.clauses.len()
-    // )
-    // .expect("Failed to write CNF header");
-    //
-    // for clause in &ctx.formula.clauses {
-    //     let literals = clause
-    //         .literals
-    //         .iter()
-    //         .map(|lit| lit.to_string())
-    //         .collect::<Vec<String>>()
-    //         .join(" ");
-    //     writeln!(output, "{} 0", literals).expect("Failed to write clause");
-    // }
-    //
-    // match output.flush() {
-    //     Ok(_) => (),
-    //     Err(e) => die!("Failed to flush output: {}", e),
-    // }
+fn print(ctx: &SATContext) {
+    if ctx.config.no_write {
+        return;
+    }
+
+    let start_time = Instant::now();
+
+    let output_path = &ctx.config.output_path;
+    let mut output: Box<dyn Write> = if output_path == "<stdout>" {
+        Box::new(io::stdout())
+    } else {
+        match output_path.as_str() {
+            path if path.ends_with(".bz2") => {
+                let file = File::create(path).expect("Failed to create output file");
+                Box::new(BzEncoder::new(file, bzip2::Compression::default()))
+            }
+            path if path.ends_with(".gz") => {
+                let file = File::create(path).expect("Failed to create output file");
+                Box::new(GzEncoder::new(file, flate2::Compression::default()))
+            }
+            path if path.ends_with(".xz") => {
+                let file = File::create(path).expect("Failed to create output file");
+                Box::new(XzEncoder::new(file, 6)) // Compression level set to 6
+            }
+            path => Box::new(File::create(path).expect("Failed to create output file")),
+        }
+    };
+
+    message!(
+        ctx.config.verbosity,
+        "writing simplified formula to '{}'",
+        ctx.config.output_path
+    );
+
+    if ctx.formula.found_empty_clause {
+        writeln!(output, "p cnf {} 0", ctx.formula.variables).expect("Failed to write CNF header");
+    } else {
+        writeln!(
+            output,
+            "p cnf {} {}",
+            ctx.formula.variables,
+            ctx.formula.clauses.len()
+        )
+        .expect("Failed to write CNF header");
+        for clause in &ctx.formula.clauses {
+            let literals = clause
+                .borrow()
+                .literals
+                .iter()
+                .map(|lit| lit.to_string())
+                .collect::<Vec<String>>()
+                .join(" ");
+            writeln!(output, "{} 0", literals).expect("Failed to write clause");
+        }
+    }
+
+    if let Err(e) = output.flush() {
+        die!("Failed to flush output: {}", e);
+    }
+
+    message!(
+        ctx.config.verbosity,
+        "writing took {:?} seconds",
+        Instant::now() - start_time
+    );
+}
+
+fn report(ctx: &SATContext) {
+    let elapsed_time = ctx.stats.start_time.elapsed().as_secs_f64();
+    let propagated_units = ctx.formula.units.len();
+    let simplified_clauses = ctx.stats.parsed - ctx.stats.added + ctx.stats.deleted;
+
+    message!(
+        ctx.config.verbosity,
+        "{:<20} {:>10}    {:.2}% variables",
+        "propagated-units:",
+        propagated_units,
+        percent(propagated_units, ctx.formula.variables)
+    );
+    message!(
+        ctx.config.verbosity,
+        "{:<20} {:>10}",
+        "elimination-rounds:",
+        ctx.stats.rounds
+    );
+    message!(
+        ctx.config.verbosity,
+        "{:<20} {:>10}    {:.2}% variables",
+        "eliminated-variables:",
+        ctx.stats.eliminated,
+        percent(ctx.stats.eliminated, ctx.formula.variables)
+    );
+    message!(
+        ctx.config.verbosity,
+        "{:<20} {:>10}    {:.2}% clauses",
+        "simplified-clauses:",
+        simplified_clauses,
+        percent(simplified_clauses, ctx.stats.parsed)
+    );
+    message!(
+        ctx.config.verbosity,
+        "{:<20} {:13.2} seconds",
+        "process-time:",
+        elapsed_time
+    );
+}
+
+fn prove(ctx: &mut SATContext) {
+    if ctx.config.proof_path.is_empty() {
+        return;
+    }
+
+    let proof_path = &ctx.config.proof_path;
+    let proof_file: Box<dyn Write> = if proof_path == "<stdout>" {
+        Box::new(io::stdout())
+    } else {
+        match proof_path.as_str() {
+            path if path.ends_with(".bz2") => {
+                let file = File::create(path).expect("Failed to create proof file");
+                Box::new(BzEncoder::new(file, bzip2::Compression::default()))
+            }
+            path if path.ends_with(".gz") => {
+                let file = File::create(path).expect("Failed to create proof file");
+                Box::new(GzEncoder::new(file, flate2::Compression::default()))
+            }
+            path if path.ends_with(".xz") => {
+                let file = File::create(path).expect("Failed to create proof file");
+                Box::new(XzEncoder::new(file, 6)) // Compression level set to 6
+            }
+            path => Box::new(File::create(path).expect("Failed to create proof file")),
+        }
+    };
+
+    ctx.proof_file = Some(proof_file);
+    message!(ctx.config.verbosity, "writing proof to '{}'", proof_path);
 }
 
 fn occurrences(ctx: &SATContext, lit: i32) -> usize {
@@ -967,12 +1035,13 @@ fn setup_context(config: Config) -> SATContext {
 fn main() {
     let config = parse_arguments();
     let mut ctx = setup_context(config);
+    prove(&mut ctx);
 
     if let Err(e) = parse_cnf(ctx.config.input_path.clone(), &mut ctx) {
         die!("Failed to parse CNF: {}", e);
     }
 
     eliminate(&mut ctx);
-    print(&mut ctx);
-    report_stats(&mut ctx);
+    print(&ctx);
+    report(&ctx);
 }
