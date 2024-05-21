@@ -1,6 +1,6 @@
-# babysub-rust
+# babyelim-rust
 
-This is the Rust template for the SAT preprocessor exercise.
+This is the Rust template for the SAT variable elimination exercise.
 
 The data structures are not as refined as in the C++ equivalent, so expect slower performance. I will try to improve them.
 

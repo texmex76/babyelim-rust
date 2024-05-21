@@ -1,7 +1,7 @@
 use bzip2;
 use bzip2::read::BzDecoder;
 use bzip2::write::BzEncoder;
-use clap::{Arg, ArgAction, Command};
+use clap::{value_parser, Arg, ArgAction, Command};
 use flate2;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -91,9 +91,11 @@ macro_rules! LOG {
 struct Config {
     input_path: String,
     output_path: String,
+    proof_path: String,
     verbosity: i32,
-    backward_mode: bool,
-    sign: bool,
+    no_write: bool,
+    size_limit: usize,
+    occurrence_limit: usize,
 }
 
 fn average(a: usize, b: usize) -> f64 {
@@ -663,8 +665,168 @@ fn parse_cnf(input_path: String, ctx: &mut SATContext) -> io::Result<()> {
     Ok(())
 }
 
+fn size_or_occurrence_limit_exceeded(ctx: &SATContext, pivot: i32) -> bool {
+    for clause_ref in ctx.formula.matrix[pivot].clone() {
+        if clause_ref.borrow().literals.len() > ctx.config.size_limit {
+            return true;
+        }
+        for &lit in &clause_ref.borrow().literals {
+            if occurrences(ctx, lit) > ctx.config.occurrence_limit {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn can_eliminate_variable(ctx: &SATContext, pivot: i32) -> bool {
+    assert!(pivot > 0);
+    if ctx.formula.elimenated[pivot as usize] {
+        return false;
+    }
+    if ctx.formula.values[pivot] != 0 {
+        return false;
+    }
+    let pos = occurrences(ctx, pivot);
+    if pos > ctx.config.occurrence_limit {
+        return false;
+    }
+    let neg = occurrences(ctx, -pivot);
+    if neg > ctx.config.occurrence_limit {
+        return false;
+    }
+    if size_or_occurrence_limit_exceeded(ctx, pivot) {
+        return false;
+    }
+    if size_or_occurrence_limit_exceeded(ctx, -pivot) {
+        return false;
+    }
+    let limit = pos + neg;
+    LOG!(
+        ctx.config.verbosity,
+        "trying to eliminate variable {} with {} occurrences",
+        pivot,
+        limit
+    );
+
+    // TODO got over all clauses with 'pivot' and count how often
+    // resolving them with a clause with '-pivot' produces an
+    // non-tautological resolvent using 'can_be_resolved'.
+
+    false
+}
+
+fn add_resolvent(ctx: &mut SATContext, clause_ref: ClauseRef, other_ref: ClauseRef) {
+    // TODO if 'c' can be resolved with 'd' on 'pivot' (assume
+    // 'pivot' is in 'c' and '-pivot' in 'd'), i.e., the resolvent is not
+    // tautological, then simplify and add it as new clause.
+    // Also connect and enqueue and trace it.
+
+    LOG!(
+        "clause {:?} resolving 1st {} antecedent",
+        clause_ref.borrow(),
+        pivot
+    );
+    LOG!(
+        "clause {:?} resolving 2nd {} antecedent",
+        other_ref.borrow(),
+        -pivot
+    );
+}
+
+fn add_all_resolvents(ctx: &mut SATContext, pivot: i32) {
+    for clause_ref in ctx.formula.matrix[pivot].clone() {
+        for other_ref in ctx.formula.matrix[-pivot].clone() {
+            add_resolvent(ctx, clause_ref.clone(), other_ref.clone());
+        }
+    }
+}
+
+fn disconnect_and_delete_all_clause_with_literal(ctx: &mut SATContext, lit: i32) {
+
+    // TODO disconnect, trace deletion and delete all clauses with 'lit'.
+
+    // NOTE you cannot disconnect the literal from 'matrix[lit]' while
+    // traversing it, so be careful (which makes the code ugly). See also
+    // 'disconnect_clause (..., int except)' above.
+
+    // TODO also dequeue clause from 'clauses'.
+
+    // TODO and finally delete it.
+}
+
+fn remove_all_clauses_with_variable(ctx: &mut SATContext, pivot: i32) {
+    disconnect_and_delete_all_clause_with_literal(ctx, pivot);
+    disconnect_and_delete_all_clause_with_literal(ctx, -pivot);
+}
+
+// TODO First get the basic 'eliminate' working.
+
+// TODO+ Second you might want to sort variables to be eliminated by
+// their occurrences (using a separate 'candidates' stack) and eliminate
+// variables with few occurrences first.
+
+// TODO++ Third you could implement a working queue instead of a round
+// based scheme, that is you mark variables as candidates if they occur
+// in deleted clauses.  Initially all variables are marked.  This would
+// avoid going through too many useless elimination attempts.
+
+// TODO+++ Finally try adding backward subsumption if you feel fancy.
+
+// But at least try to get basic eliminate working as is, which should
+// only require to work on the other 'TODO' (without '+'s at the end).
+
 fn eliminate(ctx: &mut SATContext) {
-    // TODO:
+    let start_time = Instant::now();
+    while !ctx.formula.found_empty_clause {
+        ctx.stats.rounds += 1;
+        verbose!(
+            ctx.config.verbosity,
+            1,
+            "starting variable elimination round {}",
+            ctx.stats.rounds
+        );
+        let before = ctx.stats.eliminated;
+        for pivot in 1..=ctx.formula.variables + 1 {
+            if ctx.formula.found_empty_clause {
+                break;
+            }
+            if can_eliminate_variable(ctx, pivot as i32) {
+                add_all_resolvents(ctx, pivot as i32);
+                remove_all_clauses_with_variable(ctx, pivot as i32);
+                ctx.formula.elimenated[pivot] = true;
+                ctx.stats.eliminated += 1;
+                propagate(ctx);
+            }
+            let after = ctx.stats.eliminated;
+            if before == after {
+                verbose!(
+                    ctx.config.verbosity,
+                    1,
+                    "unsuccesful variable elimination round {}",
+                    ctx.stats.rounds
+                );
+                break;
+            }
+            let delta = after - before;
+            verbose!(
+                ctx.config.verbosity,
+                1,
+                "eliminated {} variables {} in round {}",
+                delta,
+                percent(delta, ctx.formula.variables),
+                ctx.stats.rounds
+            );
+        }
+    }
+    message!(
+        ctx.config.verbosity,
+        "eliminated {} variables {} in {:?} seconds and {} rounds",
+        ctx.stats.eliminated,
+        percent(ctx.stats.eliminated, ctx.formula.variables),
+        Instant::now() - start_time,
+        ctx.stats.rounds
+    );
 }
 
 fn print(ctx: &mut SATContext) {
@@ -733,28 +895,32 @@ fn parse_arguments() -> Config {
                 .index(2),
         )
         .arg(
+            Arg::new("proof")
+                .help("Sets the proof file to use")
+                .index(2),
+        )
+        .arg(
             Arg::new("verbosity")
                 .short('v')
                 .action(ArgAction::Count)
                 .help("Increases verbosity level"),
         )
-        .arg(Arg::new("quiet").short('q').help("Suppresses all output"))
         .arg(
-            Arg::new("forward-mode")
-                .short('f')
-                .help("Enables forward subsumption"),
-        )
-        .arg(
-            Arg::new("backward-mode")
-                .short('b')
-                .help("Enables backward subsumption"),
-        )
-        .arg(
-            Arg::new("sign")
+            Arg::new("size-limit")
                 .short('s')
-                .help("Computes and adds a hash signature to the output"),
-        );
-
+                .value_parser(value_parser!(usize))
+                .default_value("1000")
+                .help("Set the size limit"),
+        )
+        .arg(
+            Arg::new("occurrence-limit")
+                .short('o')
+                .value_parser(value_parser!(usize))
+                .default_value("10000")
+                .help("Set the occurrence limit"),
+        )
+        .arg(Arg::new("quiet").short('q').help("Suppresses all output"))
+        .arg(Arg::new("no-output").short('n').help("Do not write output"));
     #[cfg(feature = "logging")]
     let app = app.arg(
         Arg::new("logging")
@@ -781,16 +947,14 @@ fn parse_arguments() -> Config {
         *matches.get_one::<u8>("verbosity").unwrap_or(&0) as i32
     };
 
-    if matches.is_present("forward-mode") && matches.is_present("backward-mode") {
-        die!("Cannot enable both forward and backward subsumption");
-    }
-
     Config {
         input_path: matches.value_of("input").unwrap_or("<stdin>").to_string(),
         output_path: matches.value_of("output").unwrap_or("<stdout>").to_string(),
+        proof_path: matches.value_of("proof").unwrap_or("").to_string(),
         verbosity,
-        backward_mode: matches.is_present("backward-mode"),
-        sign: matches.is_present("sign"),
+        no_write: matches.is_present("no-output"),
+        size_limit: *matches.get_one("size-limit").unwrap(),
+        occurrence_limit: *matches.get_one("occurrence-limit").unwrap(),
     }
 }
 
