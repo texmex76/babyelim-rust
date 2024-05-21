@@ -291,7 +291,6 @@ impl Values {
 
 struct CNFFormula {
     variables: usize,
-    added_clauses: usize,
     clauses: LinkedList<ClauseRef>,
     found_empty_clause: bool,
     matrix: Matrix,
@@ -299,7 +298,6 @@ struct CNFFormula {
     elimenated: Vec<bool>,
     values: Values,
     units: Vec<i32>,
-    resolvent: Vec<i32>,
     simplified: Vec<i32>,
 }
 
@@ -307,7 +305,6 @@ impl CNFFormula {
     fn new() -> Self {
         CNFFormula {
             variables: 0,
-            added_clauses: 0,
             clauses: LinkedList::new(),
             found_empty_clause: false,
             matrix: Matrix::new(),
@@ -315,7 +312,6 @@ impl CNFFormula {
             elimenated: Vec::new(),
             values: Values::new(),
             units: Vec::new(),
-            resolvent: Vec::new(),
             simplified: Vec::new(),
         }
     }
@@ -798,7 +794,7 @@ fn eliminate(ctx: &mut SATContext) {
     }
     message!(
         ctx.config.verbosity,
-        "eliminated {} variables {} in {:?} seconds and {} rounds",
+        "eliminated {} variables {} in {:?} and {} rounds",
         ctx.stats.eliminated,
         percent(ctx.stats.eliminated, ctx.formula.variables),
         Instant::now() - start_time,
@@ -868,7 +864,7 @@ fn print(ctx: &SATContext) {
 
     message!(
         ctx.config.verbosity,
-        "writing took {:?} seconds",
+        "writing took {:?}",
         Instant::now() - start_time
     );
 }
@@ -965,7 +961,7 @@ fn parse_arguments() -> Config {
         .arg(
             Arg::new("proof")
                 .help("Sets the proof file to use")
-                .index(2),
+                .index(3),
         )
         .arg(
             Arg::new("verbosity")
