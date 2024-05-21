@@ -1024,7 +1024,10 @@ fn parse_arguments() -> Config {
 
 fn setup_context(config: Config) -> SATContext {
     let ctx = SATContext::new(config);
-    message!(ctx.config.verbosity, "BabySub Subsumption Preprocessor");
+    message!(
+        ctx.config.verbosity,
+        "BabyElim Variable Elimination Preprocessor"
+    );
     ctx
 }
 
