@@ -300,6 +300,7 @@ struct CNFFormula {
     values: Values,
     units: Vec<i32>,
     simplified: Vec<i32>,
+    propagated: usize,
 }
 
 impl CNFFormula {
@@ -314,6 +315,7 @@ impl CNFFormula {
             values: Values::new(),
             units: Vec::new(),
             simplified: Vec::new(),
+            propagated: 0,
         }
     }
 
@@ -460,11 +462,10 @@ fn propagate(ctx: &mut SATContext, flush_units: bool) {
     if ctx.formula.found_empty_clause {
         return;
     }
-    let mut propagated = 0;
-    while propagated != ctx.formula.units.len() {
-        let lit = ctx.formula.units[propagated];
+    while ctx.formula.propagated != ctx.formula.units.len() {
+        let lit = ctx.formula.units[ctx.formula.propagated];
         LOG!(formula.config.verbosity, "propagating literal {}", lit);
-        propagated += 1;
+        ctx.formula.propagated += 1;
         assert!(ctx.formula.values[lit] == 1);
 
         // Shrink clauses with `-lit`
@@ -619,30 +620,50 @@ fn parse_cnf(input_path: String, ctx: &mut SATContext) -> io::Result<()> {
                     trace_added(ctx);
                     trace_deleted(ctx, &clause);
                 }
-                match simplified_clause.len() {
-                    0 => {
-                        if !ctx.formula.found_empty_clause {
-                            verbose!(ctx.config.verbosity, 2, "found empty clause");
-                            ctx.formula.found_empty_clause = true;
-                        }
+                let new_clause = Rc::new(RefCell::new(Clause {
+                    id: ctx.stats.added,
+                    literals: ctx.formula.simplified.clone(),
+                }));
+                ctx.formula
+                    .connect_clause(new_clause.clone(), ctx.config.verbosity);
+                ctx.formula.clauses.push_back(new_clause.clone());
+                if new_clause.borrow().literals.is_empty() {
+                    if !ctx.formula.found_empty_clause {
+                        verbose!(ctx.config.verbosity, 2, "found empty clause");
+                        ctx.formula.found_empty_clause = true;
                     }
-                    1 => {
-                        LOG!(ctx.config.verbosity, "unit clause: {:?}", simplified_clause);
-                        ctx.formula.assign(simplified_clause[0]);
-                        propagate(ctx, false);
-                    }
-                    _ => {
-                        let new_clause = Rc::new(RefCell::new(Clause {
-                            id: ctx.stats.added,
-                            literals: ctx.formula.simplified.clone(),
-                        }));
-                        ctx.formula
-                            .connect_clause(new_clause.clone(), ctx.config.verbosity);
-                        ctx.formula.clauses.push_back(new_clause);
-                        ctx.stats.added += 1;
-                    }
+                } else if new_clause.borrow().literals.len() == 1 {
+                    let unit = new_clause.borrow().literals[0];
+                    LOG!(ctx.config.verbosity, "unit clause: {:?}", unit);
+                    ctx.formula.assign(unit);
+                    propagate(ctx, false); // Propagate but delay flushing
                 }
+            } else {
+                trace_deleted(ctx, &clause);
             }
+            // match simplified_clause.len() {
+            //     0 => {
+            //         if !ctx.formula.found_empty_clause {
+            //             verbose!(ctx.config.verbosity, 2, "found empty clause");
+            //             ctx.formula.found_empty_clause = true;
+            //         }
+            //     }
+            //     1 => {
+            //         LOG!(ctx.config.verbosity, "unit clause: {:?}", simplified_clause);
+            //         ctx.formula.assign(simplified_clause[0]);
+            //         propagate(ctx, false);
+            //     }
+            //     _ => {
+            //         let new_clause = Rc::new(RefCell::new(Clause {
+            //             id: ctx.stats.added,
+            //             literals: ctx.formula.simplified.clone(),
+            //         }));
+            //         ctx.formula
+            //             .connect_clause(new_clause.clone(), ctx.config.verbosity);
+            //         ctx.formula.clauses.push_back(new_clause);
+            //         ctx.stats.added += 1;
+            //     }
+            // }
         } else {
             parse_error!(ctx, "CNF header not found.", line_number);
         }
@@ -783,33 +804,35 @@ fn eliminate(ctx: &mut SATContext) {
             if ctx.formula.found_empty_clause {
                 break;
             }
-            if can_eliminate_variable(ctx, pivot as i32) {
-                add_all_resolvents(ctx, pivot as i32);
-                remove_all_clauses_with_variable(ctx, pivot as i32);
-                ctx.formula.elimenated[pivot] = true;
-                ctx.stats.eliminated += 1;
-                propagate(ctx, true);
+            if !can_eliminate_variable(ctx, pivot as i32) {
+                continue;
             }
-            let after = ctx.stats.eliminated;
-            if before == after {
-                verbose!(
-                    ctx.config.verbosity,
-                    1,
-                    "unsuccesful variable elimination round {}",
-                    ctx.stats.rounds
-                );
-                break;
-            }
-            let delta = after - before;
+            add_all_resolvents(ctx, pivot as i32);
+            ctx.formula.elimenated[pivot] = true;
+            remove_all_clauses_with_variable(ctx, pivot as i32);
+            ctx.stats.eliminated += 1;
+            propagate(ctx, true);
+        }
+
+        let after = ctx.stats.eliminated;
+        if before == after {
             verbose!(
                 ctx.config.verbosity,
                 1,
-                "eliminated {} variables {} in round {}",
-                delta,
-                percent(delta, ctx.formula.variables),
+                "unsuccesful variable elimination round {}",
                 ctx.stats.rounds
             );
+            break;
         }
+        let delta = after - before;
+        verbose!(
+            ctx.config.verbosity,
+            1,
+            "eliminated {} variables {} in round {}",
+            delta,
+            percent(delta, ctx.formula.variables),
+            ctx.stats.rounds
+        );
     }
     message!(
         ctx.config.verbosity,
@@ -856,7 +879,20 @@ fn print(ctx: &SATContext) {
     );
 
     if ctx.formula.found_empty_clause {
-        writeln!(output, "p cnf {} 0", ctx.formula.variables).expect("Failed to write CNF header");
+        if !ctx.config.proof_path.is_empty() {
+            let mut skipped_first_empty_clause = false;
+            for clause in &ctx.formula.clauses {
+                if clause.borrow().literals.len() > 0 {
+                    trace_deleted(ctx, &clause.borrow().literals);
+                } else if skipped_first_empty_clause {
+                    trace_deleted(ctx, &clause.borrow().literals);
+                } else {
+                    skipped_first_empty_clause = true;
+                }
+            }
+            assert!(skipped_first_empty_clause);
+        }
+        writeln!(output, "p cnf {} 0", ctx.formula.variables,).expect("Failed to write CNF header");
     } else {
         writeln!(
             output,
@@ -889,16 +925,16 @@ fn print(ctx: &SATContext) {
 }
 
 fn report(ctx: &SATContext) {
+    assert!(ctx.stats.added >= ctx.stats.deleted);
     let elapsed_time = ctx.stats.start_time.elapsed().as_secs_f64();
-    let propagated_units = ctx.formula.units.len();
     let simplified_clauses = ctx.stats.parsed - ctx.stats.added + ctx.stats.deleted;
 
     message!(
         ctx.config.verbosity,
         "{:<20} {:>10}    {:.2}% variables",
         "propagated-units:",
-        propagated_units,
-        percent(propagated_units, ctx.formula.variables)
+        ctx.formula.propagated,
+        percent(ctx.formula.propagated, ctx.formula.variables)
     );
     message!(
         ctx.config.verbosity,
@@ -963,7 +999,7 @@ fn occurrences(ctx: &SATContext, lit: i32) -> usize {
 }
 
 fn parse_arguments() -> Config {
-    let app = Command::new("BabySub")
+    let app = Command::new("BabyElim")
         .version("1.0")
         .author("Bernhard Gstrein")
         .about("Processes and simplifies logical formulae in DIMACS CNF format.")
@@ -973,13 +1009,13 @@ fn parse_arguments() -> Config {
                 .index(1),
         )
         .arg(
-            Arg::new("output")
-                .help("Sets the output file to use")
+            Arg::new("proof")
+                .help("Sets the proof file to use")
                 .index(2),
         )
         .arg(
-            Arg::new("proof")
-                .help("Sets the proof file to use")
+            Arg::new("output")
+                .help("Sets the output file to use")
                 .index(3),
         )
         .arg(
