@@ -296,7 +296,9 @@ struct CNFFormula {
     found_empty_clause: bool,
     matrix: Matrix,
     marks: Marks,
-    elimenated: Vec<bool>,
+    eliminated: Vec<bool>,
+    candidates: Vec<i32>,
+    rescheduled: Vec<bool>,
     values: Values,
     units: Vec<i32>,
     simplified: Vec<i32>,
@@ -311,7 +313,9 @@ impl CNFFormula {
             found_empty_clause: false,
             matrix: Matrix::new(),
             marks: Marks::new(),
-            elimenated: Vec::new(),
+            eliminated: Vec::new(),
+            candidates: Vec::new(),
+            rescheduled: Vec::new(),
             values: Values::new(),
             units: Vec::new(),
             simplified: Vec::new(),
@@ -333,6 +337,20 @@ impl CNFFormula {
         LOG!(_verbosity, "connecting clause {:?}", clause.borrow().id);
         for &lit in &clause.borrow().literals {
             self.connect_lit(lit, clause.clone(), _verbosity);
+        }
+    }
+
+    fn disconnect_clause_except(&mut self, clause: ClauseRef, lit: i32, _verbosity: i32) {
+        LOG!(
+            _verbosity,
+            "disconnecting clause {:?} except literal {}",
+            clause.borrow().id,
+            lit
+        );
+        for &other in &clause.borrow().literals {
+            if other != lit {
+                self.matrix[other].retain(|c| c != &clause);
+            }
         }
     }
 
@@ -377,7 +395,7 @@ impl SATContext {
         self.formula
             .matrix
             .init(self.formula.variables, self.config.verbosity);
-        self.formula.elimenated = vec![false; 1 + self.formula.variables];
+        self.formula.eliminated = vec![false; 1 + self.formula.variables];
         self.formula
             .values
             .init(self.formula.variables, self.config.verbosity);
@@ -450,12 +468,25 @@ fn simplify_clause(ctx: &mut SATContext, clause: &Vec<i32>) -> Vec<i32> {
     return simplified;
 }
 
-fn trace_added(ctx: &SATContext) {
-    // TODO:
+fn trace_clause(ctx: &mut SATContext, prefix: String, clause: &Vec<i32>) {
+    if ctx.proof_file.is_none() {
+        return;
+    }
+    if prefix != "" {
+        write!(ctx.proof_file.as_mut().unwrap(), "{}", prefix).unwrap();
+    }
+    for &lit in clause {
+        write!(ctx.proof_file.as_mut().unwrap(), "{} ", lit).unwrap();
+    }
+    write!(ctx.proof_file.as_mut().unwrap(), "0\n").unwrap();
 }
 
-fn trace_deleted(ctx: &SATContext, clause: &Vec<i32>) {
-    // TODO:
+fn trace_deleted(ctx: &mut SATContext, clause: &Vec<i32>) {
+    trace_clause(ctx, "d ".to_string(), clause);
+}
+
+fn trace_added(ctx: &mut SATContext, clause: &Vec<i32>) {
+    trace_clause(ctx, "".to_string(), clause);
 }
 
 fn propagate(ctx: &mut SATContext, flush_units: bool) {
@@ -480,8 +511,8 @@ fn propagate(ctx: &mut SATContext, flush_units: bool) {
             LOG!(ctx.config.verbosity, "shrinking {:.?}", clause_ref.borrow());
             let new_size = clause_ref.borrow().literals.len() - 1;
             assert!(new_size == ctx.formula.simplified.len());
-            trace_added(&ctx);
-            trace_deleted(&ctx, &clause_ref.borrow().literals);
+            trace_added(ctx, &ctx.formula.simplified.clone());
+            trace_deleted(ctx, &clause_ref.borrow().literals);
             clause_ref.borrow_mut().literals = ctx.formula.simplified.clone();
             LOG!(ctx.config.verbosity, "shrank to {:.?}", clause_ref.borrow());
             if new_size == 0 {
@@ -617,7 +648,7 @@ fn parse_cnf(input_path: String, ctx: &mut SATContext) -> io::Result<()> {
                         "simplified clause: {:?}",
                         simplified_clause
                     );
-                    trace_added(ctx);
+                    trace_added(ctx, &simplified_clause);
                     trace_deleted(ctx, &clause);
                 }
                 let new_clause = Rc::new(RefCell::new(Clause {
@@ -641,29 +672,6 @@ fn parse_cnf(input_path: String, ctx: &mut SATContext) -> io::Result<()> {
             } else {
                 trace_deleted(ctx, &clause);
             }
-            // match simplified_clause.len() {
-            //     0 => {
-            //         if !ctx.formula.found_empty_clause {
-            //             verbose!(ctx.config.verbosity, 2, "found empty clause");
-            //             ctx.formula.found_empty_clause = true;
-            //         }
-            //     }
-            //     1 => {
-            //         LOG!(ctx.config.verbosity, "unit clause: {:?}", simplified_clause);
-            //         ctx.formula.assign(simplified_clause[0]);
-            //         propagate(ctx, false);
-            //     }
-            //     _ => {
-            //         let new_clause = Rc::new(RefCell::new(Clause {
-            //             id: ctx.stats.added,
-            //             literals: ctx.formula.simplified.clone(),
-            //         }));
-            //         ctx.formula
-            //             .connect_clause(new_clause.clone(), ctx.config.verbosity);
-            //         ctx.formula.clauses.push_back(new_clause);
-            //         ctx.stats.added += 1;
-            //     }
-            // }
         } else {
             parse_error!(ctx, "CNF header not found.", line_number);
         }
@@ -692,9 +700,43 @@ fn size_or_occurrence_limit_exceeded(ctx: &SATContext, pivot: i32) -> bool {
     false
 }
 
-fn can_eliminate_variable(ctx: &SATContext, pivot: i32) -> bool {
+fn can_be_resolved(
+    ctx: &mut SATContext,
+    pivot: i32,
+    clause_ref: ClauseRef,
+    other_ref: ClauseRef,
+) -> bool {
+    LOG!(
+        "clause {:?} tryint to resolve 1st {} antecedent",
+        clause_ref.borrow(),
+        pivot
+    );
+    LOG!(
+        "clause {:?} trying to resolve 2nd {} antecedent",
+        other_ref.borrow(),
+        -pivot
+    );
+    let mut resolvent = Vec::new();
+    for &lit in &clause_ref.borrow().literals {
+        if lit != pivot {
+            resolvent.push(lit);
+        }
+    }
+    for &lit in &other_ref.borrow().literals {
+        if lit != -pivot {
+            resolvent.push(lit);
+        }
+    }
+    if tautological_clause(ctx, &resolvent) {
+        return false;
+    }
+    LOG!("resolvent not tautological");
+    true
+}
+
+fn can_eliminate_variable(ctx: &mut SATContext, pivot: i32) -> bool {
     assert!(pivot > 0);
-    if ctx.formula.elimenated[pivot as usize] {
+    if ctx.formula.eliminated[pivot as usize] {
         return false;
     }
     if ctx.formula.values[pivot] != 0 {
@@ -722,11 +764,21 @@ fn can_eliminate_variable(ctx: &SATContext, pivot: i32) -> bool {
         limit
     );
 
-    // TODO got over all clauses with 'pivot' and count how often
-    // resolving them with a clause with '-pivot' produces an
-    // non-tautological resolvent using 'can_be_resolved'.
+    let mut resolvents = 0;
+    for clause_ref in ctx.formula.matrix[pivot].clone() {
+        for other_ref in ctx.formula.matrix[-pivot].clone() {
+            resolvents += 1;
+            if can_be_resolved(ctx, pivot, clause_ref.clone(), other_ref.clone())
+                && resolvents > limit
+            {
+                LOG!("variable {} produces more than {} resolvents", pivot, limit);
+                return false;
+            }
+        }
+    }
 
-    false
+    LOG!("variable {} produces {} resolvents", pivot, resolvents);
+    true
 }
 
 fn add_resolvent(ctx: &mut SATContext, clause_ref: ClauseRef, other_ref: ClauseRef) {
@@ -756,38 +808,29 @@ fn add_all_resolvents(ctx: &mut SATContext, pivot: i32) {
 }
 
 fn disconnect_and_delete_all_clause_with_literal(ctx: &mut SATContext, lit: i32) {
-
-    // TODO disconnect, trace deletion and delete all clauses with 'lit'.
-
-    // NOTE you cannot disconnect the literal from 'matrix[lit]' while
-    // traversing it, so be careful (which makes the code ugly). See also
-    // 'disconnect_clause (..., int except)' above.
-
-    // TODO also dequeue clause from 'clauses'.
-
-    // TODO and finally delete it.
+    for clause_ref in ctx.formula.matrix[lit].clone() {
+        ctx.formula
+            .disconnect_clause_except(clause_ref.clone(), lit, ctx.config.verbosity);
+        // INFO: dequeue from clauses. really messy without unsafe code
+        let index = ctx
+            .formula
+            .clauses
+            .iter()
+            .position(|x| Rc::ptr_eq(x, &clause_ref))
+            .unwrap();
+        let mut split_list = ctx.formula.clauses.split_off(index);
+        split_list.pop_front();
+        ctx.formula.clauses.append(&mut split_list);
+        // end dequeue
+        trace_deleted(ctx, &clause_ref.borrow().literals);
+    }
+    ctx.formula.matrix[lit].clear();
 }
 
 fn remove_all_clauses_with_variable(ctx: &mut SATContext, pivot: i32) {
     disconnect_and_delete_all_clause_with_literal(ctx, pivot);
     disconnect_and_delete_all_clause_with_literal(ctx, -pivot);
 }
-
-// TODO First get the basic 'eliminate' working.
-
-// TODO+ Second you might want to sort variables to be eliminated by
-// their occurrences (using a separate 'candidates' stack) and eliminate
-// variables with few occurrences first.
-
-// TODO++ Third you could implement a working queue instead of a round
-// based scheme, that is you mark variables as candidates if they occur
-// in deleted clauses.  Initially all variables are marked.  This would
-// avoid going through too many useless elimination attempts.
-
-// TODO+++ Finally try adding backward subsumption if you feel fancy.
-
-// But at least try to get basic eliminate working as is, which should
-// only require to work on the other 'TODO' (without '+'s at the end).
 
 fn eliminate(ctx: &mut SATContext) {
     let start_time = Instant::now();
@@ -799,16 +842,37 @@ fn eliminate(ctx: &mut SATContext) {
             "starting variable elimination round {}",
             ctx.stats.rounds
         );
-        let before = ctx.stats.eliminated;
+        assert!(ctx.formula.candidates.is_empty());
         for pivot in 1..=ctx.formula.variables + 1 {
-            if ctx.formula.found_empty_clause {
-                break;
+            if !ctx.formula.eliminated[pivot]
+                && ctx.formula.values[pivot as i32] == 0
+                && ctx.formula.rescheduled[pivot]
+            {
+                ctx.formula.candidates.push(pivot as i32);
             }
-            if !can_eliminate_variable(ctx, pivot as i32) {
+        }
+        ctx.formula.candidates.sort_by(|a, b| {
+            ctx.formula.matrix[*a]
+                .len()
+                .cmp(&ctx.formula.matrix[*b].len())
+        });
+        verbose!(
+            ctx.config.verbosity,
+            1,
+            "scheduled {} variables {}% in round {}",
+            ctx.formula.candidates.len(),
+            percent(ctx.formula.candidates.len(), ctx.formula.variables),
+            ctx.stats.rounds
+        );
+        let before = ctx.stats.eliminated;
+        while !ctx.formula.found_empty_clause && !ctx.formula.candidates.is_empty() {
+            let pivot = ctx.formula.candidates.pop().unwrap();
+            ctx.formula.rescheduled[pivot as usize] = false;
+            if !can_eliminate_variable(ctx, pivot) {
                 continue;
             }
-            add_all_resolvents(ctx, pivot as i32);
-            ctx.formula.elimenated[pivot] = true;
+            add_all_resolvents(ctx, pivot);
+            ctx.formula.eliminated[pivot as usize] = true;
             remove_all_clauses_with_variable(ctx, pivot as i32);
             ctx.stats.eliminated += 1;
             propagate(ctx, true);
@@ -844,7 +908,7 @@ fn eliminate(ctx: &mut SATContext) {
     );
 }
 
-fn print(ctx: &SATContext) {
+fn print(ctx: &mut SATContext) {
     if ctx.config.no_write {
         return;
     }
@@ -881,16 +945,23 @@ fn print(ctx: &SATContext) {
     if ctx.formula.found_empty_clause {
         if !ctx.config.proof_path.is_empty() {
             let mut skipped_first_empty_clause = false;
+            // Doing this to avois simultaneous mutable and immutable borrows
+            let mut literals_to_trace = vec![];
+
             for clause in &ctx.formula.clauses {
                 if clause.borrow().literals.len() > 0 {
-                    trace_deleted(ctx, &clause.borrow().literals);
+                    literals_to_trace.push(clause.borrow().literals.clone());
                 } else if skipped_first_empty_clause {
-                    trace_deleted(ctx, &clause.borrow().literals);
+                    literals_to_trace.push(clause.borrow().literals.clone());
                 } else {
                     skipped_first_empty_clause = true;
                 }
             }
             assert!(skipped_first_empty_clause);
+
+            for literals in literals_to_trace {
+                trace_deleted(ctx, &literals);
+            }
         }
         writeln!(output, "p cnf {} 0", ctx.formula.variables,).expect("Failed to write CNF header");
     } else {
@@ -1122,6 +1193,6 @@ fn main() {
     }
 
     eliminate(&mut ctx);
-    print(&ctx);
+    print(&mut ctx);
     report(&ctx);
 }
