@@ -395,6 +395,12 @@ impl SATContext {
         self.formula
             .values
             .init(self.formula.variables, self.config.verbosity);
+        self.formula
+            .eliminated
+            .resize(self.formula.variables + 1, false);
+        self.formula
+            .rescheduled
+            .resize(self.formula.variables + 1, false);
     }
 }
 
@@ -882,7 +888,7 @@ fn eliminate(ctx: &mut SATContext) {
             ctx.stats.rounds
         );
         assert!(ctx.formula.candidates.is_empty());
-        for pivot in 1..=ctx.formula.variables + 1 {
+        for pivot in 1..(ctx.formula.variables + 1) {
             if !ctx.formula.eliminated[pivot]
                 && ctx.formula.values[pivot as i32] == 0
                 && ctx.formula.rescheduled[pivot]
