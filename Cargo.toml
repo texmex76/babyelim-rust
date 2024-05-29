@@ -10,6 +10,8 @@ clap = "*"
 xz2 = "*"
 flate2 = "*"
 bzip2 = "*"
+anyhow = "*"
+test-case = "*"
 
 [dev-dependencies]
 assert_cmd = "*"

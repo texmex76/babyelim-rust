@@ -116,8 +116,6 @@ struct Stats {
     deleted: usize,
     eliminated: usize,
     parsed: usize,
-    resolutions: usize,
-    resolved: usize,
     rounds: usize,
     start_time: Instant,
 }
@@ -379,8 +377,6 @@ impl SATContext {
                 deleted: 0,
                 eliminated: 0,
                 parsed: 0,
-                resolutions: 0,
-                resolved: 0,
                 rounds: 0,
                 start_time: Instant::now(),
             },
@@ -530,25 +526,25 @@ fn propagate(ctx: &mut SATContext, flush_units: bool) {
         }
         ctx.formula.matrix[-lit].clear();
 
-        // TODO Disconnect, dequeue, trace and delete satisfied clauses by 'lit'
-        // but during parsing skip (at least one) unit clause with 'lit'.  Those
-        // will need to be flushed later (in 'flush_unit_clauses').
-
-        if !flush_units {
-            // TODO you could already flush all but on unit clause.
-
-            continue;
-        }
-
+        // Disconnect, dequeue, trace and delete satisfied clauses by 'lit'.
+        let mut skipped = Rc::new(RefCell::new(Clause {
+            id: usize::MAX,
+            literals: Vec::new(),
+        }));
         for clause_ref in ctx.formula.matrix[lit].clone() {
-
-            // TODO disconnect 'c' from 'matrix'.
-
-            // TODO dequeue 'c' from 'clauses'.
-
-            // TODO trace deletion and delete 'c'.
+            if clause_ref.borrow().literals.len() > 1 || skipped.borrow().id != usize::MAX {
+                disconnect_dequeue_trace_and_delete_clause(ctx, clause_ref, lit);
+            } else {
+                skipped = clause_ref;
+            }
         }
+        assert!(skipped.borrow().id != usize::MAX);
         ctx.formula.matrix[lit].clear();
+        if !flush_units {
+            disconnect_dequeue_trace_and_delete_clause(ctx, skipped, lit);
+        } else {
+            ctx.formula.matrix[lit].push(skipped);
+        }
     }
 }
 
@@ -559,17 +555,19 @@ fn flush_unit_clauses(ctx: &mut SATContext) {
         "flushing {} unit clauses",
         ctx.formula.units.len()
     );
+    // doint this to avoid simultaneous mutable and immutable borrows
+    // of ctx
+    // works but feels clunky
+    let mut clauses_and_units = vec![];
     for &unit in &ctx.formula.units {
         assert!(ctx.formula.matrix[-unit].is_empty());
-        // TODO add back 'assert(matrix[unit].size() == 1);'
+        assert!(ctx.formula.matrix[unit].len() == 1);
         for clause_ref in ctx.formula.matrix[unit].clone() {
-
-            // TODO disconnect 'c' from 'matrix'.
-
-            // TODO dequeue 'c' from 'clauses'.
-
-            // TODO trace deletion and delete 'c'.
+            clauses_and_units.push((clause_ref, unit));
         }
+    }
+    for (clause_ref, unit) in clauses_and_units {
+        disconnect_dequeue_trace_and_delete_clause(ctx, clause_ref, unit);
         ctx.formula.matrix[unit].clear();
     }
 }
@@ -651,6 +649,7 @@ fn parse_cnf(input_path: String, ctx: &mut SATContext) -> io::Result<()> {
                     trace_added(ctx, &simplified_clause);
                     trace_deleted(ctx, &clause);
                 }
+                ctx.stats.added += 1;
                 let new_clause = Rc::new(RefCell::new(Clause {
                     id: ctx.stats.added,
                     literals: ctx.formula.simplified.clone(),
@@ -781,12 +780,21 @@ fn can_eliminate_variable(ctx: &mut SATContext, pivot: i32) -> bool {
     true
 }
 
-fn add_resolvent(ctx: &mut SATContext, clause_ref: ClauseRef, other_ref: ClauseRef) {
-    // TODO if 'c' can be resolved with 'd' on 'pivot' (assume
-    // 'pivot' is in 'c' and '-pivot' in 'd'), i.e., the resolvent is not
-    // tautological, then simplify and add it as new clause.
-    // Also connect and enqueue and trace it.
-
+fn add_resolvent(ctx: &mut SATContext, pivot: i32, clause_ref: ClauseRef, other_ref: ClauseRef) {
+    let mut resolvent = Vec::new();
+    for &lit in &clause_ref.borrow().literals {
+        if lit != pivot {
+            resolvent.push(lit);
+        }
+    }
+    for &lit in &other_ref.borrow().literals {
+        if lit != -pivot {
+            resolvent.push(lit);
+        }
+    }
+    if tautological_clause(ctx, &resolvent) {
+        return;
+    }
     LOG!(
         "clause {:?} resolving 1st {} antecedent",
         clause_ref.borrow(),
@@ -797,12 +805,22 @@ fn add_resolvent(ctx: &mut SATContext, clause_ref: ClauseRef, other_ref: ClauseR
         other_ref.borrow(),
         -pivot
     );
+    simplify_clause(ctx, &resolvent);
+    ctx.stats.added += 1;
+    let new_clause = Rc::new(RefCell::new(Clause {
+        id: ctx.stats.added,
+        literals: resolvent,
+    }));
+    ctx.formula
+        .connect_clause(new_clause.clone(), ctx.config.verbosity);
+    ctx.formula.clauses.push_back(new_clause.clone());
+    trace_added(ctx, &new_clause.borrow().literals);
 }
 
 fn add_all_resolvents(ctx: &mut SATContext, pivot: i32) {
     for clause_ref in ctx.formula.matrix[pivot].clone() {
         for other_ref in ctx.formula.matrix[-pivot].clone() {
-            add_resolvent(ctx, clause_ref.clone(), other_ref.clone());
+            add_resolvent(ctx, pivot, clause_ref.clone(), other_ref.clone());
         }
     }
 }
@@ -825,6 +843,27 @@ fn disconnect_and_delete_all_clause_with_literal(ctx: &mut SATContext, lit: i32)
         trace_deleted(ctx, &clause_ref.borrow().literals);
     }
     ctx.formula.matrix[lit].clear();
+}
+
+fn disconnect_dequeue_trace_and_delete_clause(
+    ctx: &mut SATContext,
+    clause_ref: ClauseRef,
+    except: i32,
+) {
+    ctx.formula
+        .disconnect_clause_except(clause_ref.clone(), except, ctx.config.verbosity);
+    // INFO: dequeue from clauses. really messy without unsafe code
+    let index = ctx
+        .formula
+        .clauses
+        .iter()
+        .position(|x| Rc::ptr_eq(x, &clause_ref))
+        .unwrap();
+    let mut split_list = ctx.formula.clauses.split_off(index);
+    split_list.pop_front();
+    ctx.formula.clauses.append(&mut split_list);
+    // end dequeue
+    trace_deleted(ctx, &clause_ref.borrow().literals);
 }
 
 fn remove_all_clauses_with_variable(ctx: &mut SATContext, pivot: i32) {
