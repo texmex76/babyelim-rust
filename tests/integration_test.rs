@@ -113,7 +113,10 @@ fn run_test_case(test_name: &str) -> Result<()> {
 
     // Proof checking
     let mut cmd = Command::new("./checkproof");
-    cmd.arg(&cnf_path).arg(&prf_path);
+    cmd.arg("-s")
+        .arg(&cnf_path)
+        .arg(&prf_path)
+        .arg(&output_path);
     let output: Output = cmd
         .output()
         .context("Failed to execute proof checking command")?;
@@ -135,7 +138,16 @@ fn run_test_case(test_name: &str) -> Result<()> {
     Ok(())
 }
 
+#[test_case("true")]
 #[test_case("false")]
+#[test_case("trivial")]
+#[test_case("simp")]
+#[test_case("unit1")]
+#[test_case("unit2")]
+#[test_case("unit3")]
+#[test_case("unit4")]
+#[test_case("unit5")]
+#[test_case("unit6")]
 #[test_case("prime121")]
 #[test_case("prime1369")]
 #[test_case("prime1681")]
@@ -151,7 +163,6 @@ fn run_test_case(test_name: &str) -> Result<()> {
 #[test_case("prime841")]
 #[test_case("prime961")]
 #[test_case("prime9")]
-#[test_case("simp")]
 #[test_case("sqrt10201")]
 #[test_case("sqrt1042441")]
 #[test_case("sqrt10609")]
@@ -171,14 +182,6 @@ fn run_test_case(test_name: &str) -> Result<()> {
 #[test_case("sqrt6889")]
 #[test_case("sqrt7921")]
 #[test_case("sqrt9409")]
-#[test_case("trivial")]
-#[test_case("true")]
-#[test_case("unit1")]
-#[test_case("unit2")]
-#[test_case("unit3")]
-#[test_case("unit4")]
-#[test_case("unit5")]
-#[test_case("unit6")]
 fn test_cases(test_name: &str) {
     run_test_case(test_name).unwrap();
 }

@@ -332,7 +332,6 @@ impl CNFFormula {
     }
 
     fn connect_clause(&mut self, clause: ClauseRef, _verbosity: i32) {
-        LOG!(_verbosity, "connecting clause {:?}", clause.borrow().id);
         for &lit in &clause.borrow().literals {
             self.connect_lit(lit, clause.clone(), _verbosity);
         }
@@ -353,7 +352,6 @@ impl CNFFormula {
     }
 
     fn assign(&mut self, literal: i32) {
-        LOG!(self.config.verbosity, "assigning literal {}", literal);
         self.values[literal] = 1;
         self.values[-literal] = -1;
         self.units.push(literal);
@@ -412,7 +410,7 @@ fn tautological_clause(ctx: &mut SATContext, clause: &Vec<i32>) -> bool {
         }
         if ctx.formula.values[lit] > 0 {
             LOG!(
-                ctx.formula.config.verbosity,
+                ctx.config.verbosity,
                 "tautological clause {:?} literal {} satisfied",
                 clause,
                 lit
@@ -422,7 +420,7 @@ fn tautological_clause(ctx: &mut SATContext, clause: &Vec<i32>) -> bool {
         }
         if ctx.formula.marks.is_marked(-lit) {
             LOG!(
-                ctx.formula.config.verbosity,
+                ctx.config.verbosity,
                 "tautological clause {:?} containing {} and {}",
                 clause,
                 lit,
@@ -443,21 +441,11 @@ fn simplify_clause(ctx: &mut SATContext, clause: &Vec<i32>) -> Vec<i32> {
     let mut simplified = Vec::new();
     for &lit in clause {
         if ctx.formula.marks.is_marked(lit) {
-            LOG!(
-                ctx.formula.config.verbosity,
-                "duplicated {} in {:?}",
-                lit,
-                clause
-            );
+            LOG!(ctx.config.verbosity, "duplicated {} in {:?}", lit, clause);
             continue;
         }
         if ctx.formula.values[lit] < 0 {
-            LOG!(
-                ctx.formula.config.verbosity,
-                "falsified {} in {:?}",
-                lit,
-                clause
-            );
+            LOG!(ctx.config.verbosity, "falsified {} in {:?}", lit, clause);
             continue;
         }
         assert!(!ctx.formula.marks.is_marked(-lit));
@@ -497,7 +485,7 @@ fn propagate(ctx: &mut SATContext, flush_units: bool) {
     }
     while ctx.formula.propagated != ctx.formula.units.len() {
         let lit = ctx.formula.units[ctx.formula.propagated];
-        LOG!(formula.config.verbosity, "propagating literal {}", lit);
+        LOG!(ctx.config.verbosity, "propagating literal {}", lit);
         ctx.formula.propagated += 1;
         assert!(ctx.formula.values[lit] == 1);
 
@@ -519,13 +507,18 @@ fn propagate(ctx: &mut SATContext, flush_units: bool) {
             LOG!(ctx.config.verbosity, "shrank to {:.?}", clause_ref.borrow());
             if new_size == 0 {
                 if !ctx.formula.found_empty_clause {
-                    verbose!(ctx.config.verbosity, 2, "found empty clause");
+                    verbose!(
+                        ctx.config.verbosity,
+                        2,
+                        "found empty clause while propagating"
+                    );
                     ctx.formula.found_empty_clause = true;
                 }
             } else if new_size == 1 {
                 let unit = ctx.formula.simplified[0];
                 let value = ctx.formula.values[unit];
                 if value == 0 {
+                    LOG!(ctx.config.verbosity, "assigning literal {}", unit);
                     ctx.formula.assign(unit);
                 }
             }
@@ -546,7 +539,7 @@ fn propagate(ctx: &mut SATContext, flush_units: bool) {
         }
         assert!(skipped.borrow().id != usize::MAX);
         ctx.formula.matrix[lit].clear();
-        if !flush_units {
+        if flush_units {
             disconnect_dequeue_trace_and_delete_clause(ctx, skipped, lit);
         } else {
             ctx.formula.matrix[lit].push(skipped);
@@ -658,19 +651,20 @@ fn parse_cnf(input_path: String, ctx: &mut SATContext) -> io::Result<()> {
                 ctx.stats.added += 1;
                 let new_clause = Rc::new(RefCell::new(Clause {
                     id: ctx.stats.added,
-                    literals: ctx.formula.simplified.clone(),
+                    literals: simplified_clause,
                 }));
                 ctx.formula
                     .connect_clause(new_clause.clone(), ctx.config.verbosity);
                 ctx.formula.clauses.push_back(new_clause.clone());
                 if new_clause.borrow().literals.is_empty() {
                     if !ctx.formula.found_empty_clause {
-                        verbose!(ctx.config.verbosity, 2, "found empty clause");
+                        verbose!(ctx.config.verbosity, 2, "found empty clause while parsing");
                         ctx.formula.found_empty_clause = true;
                     }
                 } else if new_clause.borrow().literals.len() == 1 {
                     let unit = new_clause.borrow().literals[0];
                     LOG!(ctx.config.verbosity, "unit clause: {:?}", unit);
+                    LOG!(ctx.config.verbosity, "assigning literal {}", unit);
                     ctx.formula.assign(unit);
                     propagate(ctx, false); // Propagate but delay flushing
                 }
@@ -712,11 +706,13 @@ fn can_be_resolved(
     other_ref: ClauseRef,
 ) -> bool {
     LOG!(
+        ctx.config.verbosity,
         "clause {:?} tryint to resolve 1st {} antecedent",
-        clause_ref.borrow(),
+        clause_ref.borrow().literals,
         pivot
     );
     LOG!(
+        ctx.config.verbosity,
         "clause {:?} trying to resolve 2nd {} antecedent",
         other_ref.borrow(),
         -pivot
@@ -735,7 +731,7 @@ fn can_be_resolved(
     if tautological_clause(ctx, &resolvent) {
         return false;
     }
-    LOG!("resolvent not tautological");
+    LOG!(ctx.config.verbosity, "resolvent not tautological");
     true
 }
 
@@ -776,13 +772,23 @@ fn can_eliminate_variable(ctx: &mut SATContext, pivot: i32) -> bool {
             if can_be_resolved(ctx, pivot, clause_ref.clone(), other_ref.clone())
                 && resolvents > limit
             {
-                LOG!("variable {} produces more than {} resolvents", pivot, limit);
+                LOG!(
+                    ctx.config.verbosity,
+                    "variable {} produces more than {} resolvents",
+                    pivot,
+                    limit
+                );
                 return false;
             }
         }
     }
 
-    LOG!("variable {} produces {} resolvents", pivot, resolvents);
+    LOG!(
+        ctx.config.verbosity,
+        "variable {} produces {} resolvents",
+        pivot,
+        resolvents
+    );
     true
 }
 
@@ -802,11 +808,13 @@ fn add_resolvent(ctx: &mut SATContext, pivot: i32, clause_ref: ClauseRef, other_
         return;
     }
     LOG!(
+        ctx.config.verbosity,
         "clause {:?} resolving 1st {} antecedent",
         clause_ref.borrow(),
         pivot
     );
     LOG!(
+        ctx.config.verbosity,
         "clause {:?} resolving 2nd {} antecedent",
         other_ref.borrow(),
         -pivot
@@ -1008,7 +1016,8 @@ fn print(ctx: &mut SATContext) {
                 trace_deleted(ctx, &literals);
             }
         }
-        writeln!(output, "p cnf {} 0", ctx.formula.variables,).expect("Failed to write CNF header");
+        writeln!(output, "p cnf {} 1\n0", ctx.formula.variables,)
+            .expect("Failed to write CNF header");
     } else {
         writeln!(
             output,
