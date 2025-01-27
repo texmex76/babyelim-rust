@@ -1,10 +1,6 @@
 # babyelim-rust
 
-This is the Rust template for the SAT variable elimination exercise.
-
-I had no time to implement a solution for myself yet, so I am unsure if there are any bugs.
-
-If you have any suggestions or find some bugs, pull requests are welcome!
+This is a Rust solution for the SAT variable elimination exercise.
 
 # Running
 
